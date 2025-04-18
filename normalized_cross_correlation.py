@@ -5,6 +5,7 @@ import cv2
 import random
 import os
 import matplotlib.pyplot as plt
+from PIL import Image
 
 COLORS = ["orange", "blue", "green", "cyan", "red", "yellow", "magenta", "peru", "azure", "slateblue"]
 
@@ -17,54 +18,71 @@ def plot_bbox(bbox_XYXY, label, color, added_labels, score):
 
 
 def load_templates(template_dir):
-    """Load templates for digits 0-9 from the template directory."""
-    templates = {str(digit): [] for digit in range(10)}
+    """Load the first image from each shape (circle, square, star, triangle) as templates without resizing and remove background."""
+    shapes = ["circle", "square", "star", "triangle"]
+    templates = {}
 
-    for digit in range(10):
-        digit_dir = os.path.join(template_dir, str(digit))
-        if not os.path.exists(digit_dir):
-            print(f"Missing digit directory: {digit_dir}")
-            continue 
+    for shape in shapes:
+        shape_dir = os.path.join(template_dir, shape)
+        if os.path.exists(shape_dir):
+            shape_images = [f for f in os.listdir(shape_dir) if f.endswith(".png")]
+            if shape_images:
+                # Select the first image from the directory
+                selected_image = shape_images[0]
+                image_path = os.path.join(shape_dir, selected_image)
 
-        for filename in os.listdir(digit_dir):
-            if filename.endswith(".png"):
-                template = cv2.imread(os.path.join(digit_dir, filename), cv2.IMREAD_GRAYSCALE)
-                if template is not None:
-                    templates[str(digit)].append(template)
-                else:
-                    print(f"Failed to load template: {filename}")
+                # Open the image and convert to RGBA (with transparency channel)
+                img = Image.open(image_path).convert('RGBA')
+
+                # Get the image data
+                datas = img.getdata()
+                new_data = []
+                for item in datas:
+                    if item[:3] == (255, 255, 255):  # If the pixel is white (255, 255, 255)
+                        new_data.append((255, 255, 255, 0))  # Make it transparent
+                    else:
+                        new_data.append(item)
+
+                # Update the image data with the modified pixels
+                img.putdata(new_data)
+
+                # Convert back to a numpy array (for use with OpenCV)
+                template = np.array(img)
+
+                # If the template has an alpha channel, remove it (convert to grayscale)
+                if template.shape[2] == 4:
+                    template = cv2.cvtColor(template, cv2.COLOR_RGBA2GRAY)
+
+                templates[shape] = template
+            else:
+                print(f"No images found in {shape_dir}")
+        else:
+            print(f"Missing directory for shape: {shape}")
 
     return templates
 
-def detect_digits_with_templates(image, templates, max_threshold=0.65, scales=None):
-    """Detect digits using template matching, prioritizing larger scales first."""
-    if scales is None:
-        scales = [2.5, 2.0, 1.5, 1.0, 0.75, 0.5]  # Largest first
 
+
+def detect_shapes_with_templates(image, templates, threshold=0.65):
+    """Detect 4 shapes using fixed-size (200x200) template matching."""
     image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     detected_boxes, detected_labels, detected_scores = [], [], []
 
-    for scale in scales:
-        for digit, template_list in templates.items():
-            for template in template_list:
-                resized_template = cv2.resize(template, None, fx=scale, fy=scale)
+    for label, template in templates.items():
+        result = cv2.matchTemplate(image_gray, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
 
-                result = cv2.matchTemplate(image_gray, resized_template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > threshold:
+            h, w = template.shape
+            new_box = [max_loc[0], max_loc[1], max_loc[0] + w, max_loc[1] + h]
 
-                if max_val > max_threshold:
-                    h, w = resized_template.shape
-                    new_box = [max_loc[0], max_loc[1], max_loc[0] + w, max_loc[1] + h]
-
-                    if not any(is_inside(new_box, existing_box) for existing_box in detected_boxes):
-                        detected_boxes.append(new_box)
-                        detected_labels.append(digit)
-                        detected_scores.append(max_val)
+            if not any(is_inside(new_box, existing_box) for existing_box in detected_boxes):
+                detected_boxes.append(new_box)
+                detected_labels.append(label)
+                detected_scores.append(max_val)
 
     return detected_boxes, detected_labels, detected_scores
-
-
 
 
 def is_inside(box1, box2):
@@ -75,8 +93,7 @@ def is_inside(box1, box2):
     return (x2_min <= x1_min and x2_max >= x1_max and y2_min <= y1_min and y2_max >= y1_max)
 
 
-
-def non_maximum_suppression(boxes, scores, labels, iou_threshold=0.1):
+def non_maximum_suppression(boxes, scores, labels, iou_threshold=0.3):
     if len(boxes) == 0:
         return [], [], []
 
@@ -113,7 +130,6 @@ def non_maximum_suppression(boxes, scores, labels, iou_threshold=0.1):
         intersection = w * h
         iou = intersection / (areas[i] + areas[order[1:]] - intersection)
 
-    
         remaining_indices = np.where(iou <= iou_threshold)[0] + 1
         remaining_indices = [order[idx] for idx in remaining_indices]
 
@@ -124,44 +140,39 @@ def non_maximum_suppression(boxes, scores, labels, iou_threshold=0.1):
     return keep_boxes, keep_scores, keep_labels
 
 
+def main(image_path="./output_image.jpg"):
+    """Main function to process a specific image and detect shapes."""
+    # Load the image and templates
+    templates = load_templates('./four_shapes/2/shapes/')  # Load first images from each shape
 
-def main(directory="data/mnist_detection/test/", num_images=3):
-    """Main function to process images and detect digits."""
-    base_path = pathlib.Path(directory)
-    image_dir = base_path.joinpath("images")
+    # Read the image to be processed
+    im = plt.imread(image_path)
+    im_bgr = cv2.imread(image_path)
 
-    templates = load_templates('./templates')
+    # Perform shape detection
+    detected_boxes, detected_labels, detected_scores = detect_shapes_with_templates(im_bgr, templates)
 
-    impaths = list(image_dir.glob("*.png"))
-    selected_impaths = random.sample(impaths, min(num_images, len(impaths)))
+    # Apply non-maximum suppression
+    final_boxes, final_scores, final_labels = non_maximum_suppression(
+        detected_boxes, detected_scores, detected_labels
+    )
 
-    for impath in selected_impaths:
-        im = plt.imread(str(impath))
-        im_bgr = cv2.imread(str(impath))
+    # Plot results
+    plt.imshow(im, cmap="gray")
+    added_labels = set()
+    for bbox, shape, score in zip(final_boxes, final_labels, final_scores):
+        color = COLORS[hash(shape) % len(COLORS)]  # Ensure color mapping for shapes
+        plot_bbox(bbox, shape, color, added_labels, score)
 
-        detected_boxes, detected_labels, detected_scores = detect_digits_with_templates(im_bgr, templates)
-
-        final_boxes, final_scores, final_labels = non_maximum_suppression(
-            detected_boxes, detected_scores, detected_labels
-        )
-
-        plt.imshow(im, cmap="gray")
-        added_labels = set()
-        for bbox, digit, score in zip(final_boxes, final_labels, final_scores):
-            color = COLORS[int(digit)]
-            plot_bbox(bbox, digit, color, added_labels, score)
-
-        plt.title("Detected Digits (0-9) in Image")
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', facecolor='gray', framealpha=1.0)
-        plt.tight_layout()
-        plt.show()
-
+    plt.title("Detected Shapes (Circle, Square, Star, Triangle) in Image")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', facecolor='gray', framealpha=1.0)
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("directory", nargs="?", default="data/mnist_detection/test/", help="Directory containing the images and labels")
-    parser.add_argument("--num_images", type=int, default=5, help="Number of random images to process")
+    parser.add_argument("image_path", nargs="?", default="./output_image.jpg", help="Path to the specific image")
     args = parser.parse_args()
 
-    main(args.directory, args.num_images)
+    main(args.image_path)
